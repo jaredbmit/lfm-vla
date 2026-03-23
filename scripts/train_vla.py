@@ -1,5 +1,11 @@
 """VLA: VLM + learnable action query token + MLP action head, trained with BC on CALVIN."""
 
+import csv
+import json
+import time
+from datetime import datetime
+from pathlib import Path
+
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -15,14 +21,16 @@ SYSTEM_PROMPT = (
 )
 
 BATCH_SIZE = 4
-NUM_STEPS = 1000
-LOG_EVERY = 50
-EVAL_EVERY = 200
+NUM_STEPS = 10000
+LOG_EVERY = 100
+EVAL_EVERY = 500
+SAVE_EVERY = 1000
 LR = 1e-5
 HIDDEN_DIM = 2048
 ACTION_DIM = 7
 CHUNK_SIZE = 10
 MAX_LENGTH = 256
+RUN_DIR = "runs"
 
 
 class VLA(nn.Module):
@@ -57,7 +65,50 @@ class VLA(nn.Module):
         return raw.view(-1, self.chunk_size, self.action_dim)  # (B, chunk_size, 7)
 
 
+def save_checkpoint(run_dir: Path, tag: str, vla, optimizer, processor, step, val_loss):
+    ckpt_dir = run_dir / "checkpoints" / tag
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+    # Save action head weights
+    torch.save({
+        "step": step,
+        "val_loss": val_loss,
+        "action_head": vla.action_head.state_dict(),
+    }, ckpt_dir / "action_head.pt")
+
+    # Save full VLM (includes fine-tuned weights + resized embeddings)
+    vla.vlm.save_pretrained(ckpt_dir / "vlm")
+    processor.save_pretrained(ckpt_dir / "vlm")
+
+    # Save optimizer state for resuming
+    torch.save(optimizer.state_dict(), ckpt_dir / "optimizer.pt")
+
+    print(f"  Saved checkpoint: {ckpt_dir}")
+
+
 def main():
+    # Create run directory
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = Path(RUN_DIR) / timestamp
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    # Save hyperparameters
+    hparams = {
+        "calvin_base": CALVIN_BASE, "model_id": MODEL_ID,
+        "batch_size": BATCH_SIZE, "num_steps": NUM_STEPS, "lr": LR,
+        "hidden_dim": HIDDEN_DIM, "action_dim": ACTION_DIM,
+        "chunk_size": CHUNK_SIZE, "max_length": MAX_LENGTH,
+    }
+    with open(run_dir / "hparams.json", "w") as f:
+        json.dump(hparams, f, indent=2)
+
+    # Set up CSV logger
+    log_path = run_dir / "metrics.csv"
+    log_file = open(log_path, "w", newline="")
+    csv_writer = csv.writer(log_file)
+    csv_writer.writerow(["step", "train_loss", "val_loss", "elapsed_sec"])
+
+    print(f"Run directory: {run_dir}")
     print("Loading processor...")
     processor = AutoProcessor.from_pretrained(MODEL_ID, max_image_tokens=256)
     processor.tokenizer.padding_side = "right"
@@ -105,6 +156,8 @@ def main():
     vla.train()
     train_iter = iter(train_loader)
     running_loss = 0.0
+    best_val_loss = float("inf")
+    start_time = time.time()
 
     for step in range(1, NUM_STEPS + 1):
         try:
@@ -127,7 +180,10 @@ def main():
 
         if step % LOG_EVERY == 0:
             avg_loss = running_loss / LOG_EVERY
-            print(f"  step {step:5d}  train_loss={avg_loss:.6f}")
+            elapsed = time.time() - start_time
+            print(f"  step {step:5d}  train_loss={avg_loss:.6f}  [{elapsed:.0f}s]")
+            csv_writer.writerow([step, f"{avg_loss:.6f}", "", f"{elapsed:.1f}"])
+            log_file.flush()
             running_loss = 0.0
 
         if step % EVAL_EVERY == 0:
@@ -140,8 +196,26 @@ def main():
                     val_batch = {k: v.to(device) for k, v in val_batch.items()}
                     val_loss_sum += loss_fn(vla(**val_batch), gt).item()
                     val_steps += 1
-            print(f"           val_loss={val_loss_sum / val_steps:.6f}")
+            val_loss = val_loss_sum / val_steps
+            elapsed = time.time() - start_time
+            print(f"           val_loss={val_loss:.6f}")
+            csv_writer.writerow([step, "", f"{val_loss:.6f}", f"{elapsed:.1f}"])
+            log_file.flush()
+
+            # Save best model
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                save_checkpoint(run_dir, "best", vla, optimizer, processor, step, val_loss)
+
             vla.train()
+
+        if step % SAVE_EVERY == 0:
+            save_checkpoint(run_dir, f"step_{step}", vla, optimizer, processor, step, best_val_loss)
+
+    # Save final checkpoint
+    save_checkpoint(run_dir, "final", vla, optimizer, processor, NUM_STEPS, best_val_loss)
+
+    log_file.close()
 
     # --- Final check ---
     vla.eval()
@@ -158,6 +232,11 @@ def main():
         gt = gt_actions[i, 0].cpu().tolist()
         print(f"  [{i}] pred: [{', '.join(f'{x:+.3f}' for x in pred)}]")
         print(f"      gt:   [{', '.join(f'{x:+.3f}' for x in gt)}]")
+
+    elapsed = time.time() - start_time
+    print(f"\nTotal training time: {elapsed:.0f}s ({elapsed/3600:.1f}h)")
+    print(f"Best val loss: {best_val_loss:.6f}")
+    print(f"Run saved to: {run_dir}")
 
 
 if __name__ == "__main__":
