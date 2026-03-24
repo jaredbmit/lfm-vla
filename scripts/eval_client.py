@@ -8,6 +8,7 @@ Usage:
         --dataset_path ~/drl/calvin/dataset/task_D_D \
         --num_sequences 1000
 """
+from __future__ import annotations
 
 import argparse
 import base64
@@ -19,8 +20,9 @@ import time
 from collections import Counter
 from pathlib import Path
 
+import imageio
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 from tqdm.auto import tqdm
 
 from calvin_agent.evaluation.multistep_sequences import get_sequences
@@ -44,10 +46,23 @@ class InferenceClient:
         self.buf = bytearray()
         self.action_queue = []
 
-    def connect(self):
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock.connect((self.host, self.port))
-        print(f"Connected to inference server at {self.host}:{self.port}")
+    def connect(self, retry_interval: float = 5.0, timeout: float = 300.0):
+        deadline = time.time() + timeout
+        while True:
+            try:
+                self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.sock.connect((self.host, self.port))
+                print(f"Connected to inference server at {self.host}:{self.port}")
+                return
+            except ConnectionRefusedError:
+                self.sock.close()
+                if time.time() >= deadline:
+                    raise ConnectionRefusedError(
+                        f"Could not connect to inference server at {self.host}:{self.port} "
+                        f"after {timeout:.0f}s. Is eval_server.py running?"
+                    )
+                print(f"Waiting for inference server at {self.host}:{self.port} ...", flush=True)
+                time.sleep(retry_interval)
 
     def close(self):
         if self.sock:
@@ -100,7 +115,20 @@ def make_env(dataset_path):
     return get_env(val_folder, show_gui=False)
 
 
-def rollout(env, client, task_oracle, subtask, val_annotations, debug):
+def _annotate_frame(frame: np.ndarray, label: str) -> np.ndarray:
+    """Upscale frame 2x and burn a text label into the bottom strip."""
+    img = Image.fromarray(frame).resize((frame.shape[1] * 2, frame.shape[0] * 2), Image.NEAREST)
+    draw = ImageDraw.Draw(img)
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 12)
+    except OSError:
+        font = ImageFont.load_default()
+    draw.rectangle([0, img.height - 18, img.width, img.height], fill=(0, 0, 0))
+    draw.text((4, img.height - 16), label, fill=(255, 255, 255), font=font)
+    return np.array(img)
+
+
+def rollout(env, client, task_oracle, subtask, val_annotations, debug, frames=None):
     if debug:
         print(f"{subtask} ", end="", flush=True)
 
@@ -110,6 +138,9 @@ def rollout(env, client, task_oracle, subtask, val_annotations, debug):
     start_info = env.get_info()
 
     for step in range(EP_LEN):
+        if frames is not None:
+            frames.append(_annotate_frame(obs["rgb_obs"]["rgb_static"], lang_annotation))
+
         action = client.step(obs, lang_annotation)
         obs, _, _, current_info = env.step(action)
 
@@ -124,7 +155,7 @@ def rollout(env, client, task_oracle, subtask, val_annotations, debug):
     return False
 
 
-def evaluate_sequence(env, client, task_oracle, initial_state, eval_sequence, val_annotations, debug):
+def evaluate_sequence(env, client, task_oracle, initial_state, eval_sequence, val_annotations, debug, frames=None):
     robot_obs, scene_obs = get_env_state_for_initial_condition(initial_state)
     env.reset(robot_obs=robot_obs, scene_obs=scene_obs)
 
@@ -134,12 +165,20 @@ def evaluate_sequence(env, client, task_oracle, initial_state, eval_sequence, va
         print("  ", end="")
 
     for subtask in eval_sequence:
-        success = rollout(env, client, task_oracle, subtask, val_annotations, debug)
+        success = rollout(env, client, task_oracle, subtask, val_annotations, debug, frames=frames)
         if success:
             success_counter += 1
         else:
             return success_counter
     return success_counter
+
+
+def save_video(frames: list, path: Path, fps: int = 30):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with imageio.get_writer(str(path), fps=fps, codec="libx264", quality=7) as writer:
+        for frame in frames:
+            writer.append_data(frame)
+    print(f"  Saved video: {path}")
 
 
 def print_and_save(results, sequences, log_dir, num_sequences):
@@ -193,6 +232,10 @@ def main():
     parser.add_argument("--num_sequences", type=int, default=1000)
     parser.add_argument("--eval_log_dir", default=None)
     parser.add_argument("--debug", action="store_true")
+    parser.add_argument("--num_videos", type=int, default=0,
+                        help="Save MP4 videos for the first N sequences (0 = disabled)")
+    parser.add_argument("--video_dir", default=None,
+                        help="Directory to save videos (default: eval_log_dir/videos or ./eval_videos)")
     args = parser.parse_args()
 
     # Load CALVIN task oracle and annotations
@@ -219,6 +262,13 @@ def main():
     client = InferenceClient(args.host, args.port)
     client.connect()
 
+    video_dir = None
+    if args.num_videos > 0:
+        video_dir = Path(args.video_dir) if args.video_dir else (
+            Path(args.eval_log_dir) / "videos" if args.eval_log_dir else Path("eval_videos")
+        )
+        print(f"Saving first {args.num_videos} sequence videos to {video_dir}/")
+
     results = []
     seq_iter = eval_sequences
     if not args.debug:
@@ -227,11 +277,17 @@ def main():
     start_time = time.time()
 
     try:
-        for initial_state, eval_sequence in seq_iter:
+        for seq_idx, (initial_state, eval_sequence) in enumerate(seq_iter):
+            frames = [] if (video_dir is not None and seq_idx < args.num_videos) else None
             result = evaluate_sequence(
                 env, client, task_oracle, initial_state, eval_sequence, val_annotations, args.debug,
+                frames=frames,
             )
             results.append(result)
+            if frames:
+                tasks_str = "_".join(eval_sequence[:result + 1] if result < len(eval_sequence) else eval_sequence)
+                fname = f"seq{seq_idx:03d}_{result}of{len(eval_sequence)}_{tasks_str[:60]}.mp4"
+                save_video(frames, video_dir / fname)
             if not args.debug:
                 seq_iter.set_description(
                     " ".join([f"{i+1}/5: {v*100:.1f}% |" for i, v in enumerate(count_success(results))])

@@ -15,14 +15,15 @@ from vla import VLA, ACTION_TOKEN, CHUNK_SIZE, MAX_LENGTH, SYSTEM_PROMPT
 from vla.config import ACTION_DIM, HIDDEN_DIM
 from vla.data import CALVINDataset, make_calvin_collate_fn
 
-CALVIN_BASE = "/home/schmidt/ssci-jaredb/scratch_ssci-rus/datasets/CALVIN/task_D_D_annotated"
-MODEL_ID = "LiquidAI/LFM2-VL-3B"
-RUN_DIR = "/home/schmidt/ssci-jaredb/scratch_ssci-rus/jaredb/lfm_vla/runs"
+# CALVIN_BASE = "/home/jared/drl/calvin/dataset/task_D_D_annotated"
+CALVIN_BASE = "/home/jared/drl/calvin/dataset/calvin_debug_dataset"
+MODEL_ID = "LiquidAI/LFM2-VL-1.6B"
+RUN_DIR = "/home/jared/lfm-vla/runs"
 
 BATCH_SIZE = 4
-NUM_STEPS = 10000
+NUM_STEPS = 1000
 LOG_EVERY = 100
-EVAL_EVERY = 1000
+EVAL_EVERY = 500
 SAVE_EVERY = NUM_STEPS // 4
 LR = 1e-5
 
@@ -154,14 +155,14 @@ def main():
 
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
-                save_checkpoint(run_dir, "best", vla, optimizer, processor, step, val_loss)
+                save_checkpoint(run_dir, "best", vla, processor, step, val_loss)
 
             vla.train()
 
         if step % SAVE_EVERY == 0:
-            save_checkpoint(run_dir, f"step_{step}", vla, optimizer, processor, step, best_val_loss)
+            save_checkpoint(run_dir, f"step_{step}", vla, processor, step, best_val_loss)
 
-    save_checkpoint(run_dir, "final", vla, optimizer, processor, NUM_STEPS, best_val_loss)
+    save_checkpoint(run_dir, "final", vla, processor, NUM_STEPS, best_val_loss)
 
     log_file.close()
 
