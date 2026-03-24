@@ -15,19 +15,19 @@ from vla import VLA, ACTION_TOKEN, CHUNK_SIZE, MAX_LENGTH, SYSTEM_PROMPT
 from vla.config import ACTION_DIM, HIDDEN_DIM
 from vla.data import CALVINDataset, make_calvin_collate_fn
 
-CALVIN_BASE = "/home/jared/drl/calvin/dataset/calvin_debug_dataset"
+CALVIN_BASE = "/home/schmidt/ssci-jaredb/scratch_ssci-rus/datasets/CALVIN/task_D_D_annotated"
 MODEL_ID = "LiquidAI/LFM2-VL-3B"
+RUN_DIR = "/home/schmidt/ssci-jaredb/scratch_ssci-rus/jaredb/lfm_vla/runs"
 
 BATCH_SIZE = 4
 NUM_STEPS = 10000
 LOG_EVERY = 100
-EVAL_EVERY = 500
-SAVE_EVERY = 1000
+EVAL_EVERY = 1000
+SAVE_EVERY = NUM_STEPS // 4
 LR = 1e-5
-RUN_DIR = "runs"
 
 
-def save_checkpoint(run_dir: Path, tag: str, vla, optimizer, processor, step, val_loss):
+def save_checkpoint(run_dir: Path, tag: str, vla, processor, step, val_loss):
     ckpt_dir = run_dir / "checkpoints" / tag
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
@@ -39,8 +39,6 @@ def save_checkpoint(run_dir: Path, tag: str, vla, optimizer, processor, step, va
 
     vla.vlm.save_pretrained(ckpt_dir / "vlm")
     processor.save_pretrained(ckpt_dir / "vlm")
-
-    torch.save(optimizer.state_dict(), ckpt_dir / "optimizer.pt")
 
     print(f"  Saved checkpoint: {ckpt_dir}")
 
