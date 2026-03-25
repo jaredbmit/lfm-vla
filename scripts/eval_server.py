@@ -20,7 +20,7 @@ from PIL import Image
 from transformers import AutoModelForImageTextToText, AutoProcessor
 
 from vla import VLA, ACTION_TOKEN, CHUNK_SIZE, MODEL_REGISTRY, SYSTEM_PROMPT
-from vla.config import ACTION_DIM
+from vla.config import ACTION_DIM, IMAGE_SIZE
 
 
 def load_checkpoint(ckpt_dir: Path, device: str, spec):
@@ -38,7 +38,9 @@ def load_checkpoint(ckpt_dir: Path, device: str, spec):
     vla = VLA(vlm, action_token_id=action_token_id, hidden_dim=spec.hidden_dim).to(device)
 
     ckpt = torch.load(ckpt_dir / "action_head.pt", map_location=device, weights_only=True)
-    vla.action_head.load_state_dict(ckpt["action_head"])
+    vla.proj.load_state_dict(ckpt["proj"])
+    vla.pose_head.load_state_dict(ckpt["pose_head"])
+    vla.gripper_head.load_state_dict(ckpt["gripper_head"])
     vla.eval()
 
     print(f"Loaded checkpoint from step {ckpt['step']}, val_loss={ckpt['val_loss']:.6f}")
@@ -124,6 +126,7 @@ def postprocess(pred_chunk: torch.Tensor) -> list[list[float]]:
 def handle_request(data: dict, vla, processor, collate_style: str, device: str, max_length: int = 512) -> dict:
     img_bytes = base64.b64decode(data["image"])
     image = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+    image = image.resize((IMAGE_SIZE, IMAGE_SIZE), Image.BICUBIC)
     instruction = data["instruction"]
 
     vlm_inputs = preprocess(image, instruction, processor, collate_style, device, max_length=max_length)

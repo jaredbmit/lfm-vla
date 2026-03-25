@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader
 from transformers import AutoModelForImageTextToText, AutoProcessor
 
 from vla import VLA, ACTION_TOKEN, CHUNK_SIZE, MODEL_REGISTRY, SYSTEM_PROMPT
-from vla.config import ACTION_DIM
+from vla.config import ACTION_DIM, GRIPPER_LOSS_WEIGHT, IMAGE_SIZE, RGB_PAD
 from vla.data import CALVINDataset, make_calvin_collate_fn
 
 # CALVIN_BASE = "/home/jared/drl/calvin/dataset/task_D_D_annotated"
@@ -39,7 +39,9 @@ def save_checkpoint(run_dir: Path, tag: str, vla, processor, step, val_loss):
     torch.save({
         "step": step,
         "val_loss": val_loss,
-        "action_head": vla.action_head.state_dict(),
+        "proj": vla.proj.state_dict(),
+        "pose_head": vla.pose_head.state_dict(),
+        "gripper_head": vla.gripper_head.state_dict(),
     }, ckpt_dir / "action_head.pt")
 
     vla.vlm.save_pretrained(ckpt_dir / "vlm")
@@ -97,8 +99,10 @@ def main():
     total = sum(p.numel() for p in vla.parameters())
     print(f"Trainable: {trainable:,} / {total:,} params ({100 * trainable / total:.2f}%)")
 
-    train_ds = CALVINDataset(f"{CALVIN_BASE}/training", chunk_size=CHUNK_SIZE)
-    val_ds = CALVINDataset(f"{CALVIN_BASE}/validation", chunk_size=CHUNK_SIZE)
+    train_ds = CALVINDataset(f"{CALVIN_BASE}/training", chunk_size=CHUNK_SIZE,
+                             image_size=IMAGE_SIZE, rgb_pad=RGB_PAD)
+    val_ds = CALVINDataset(f"{CALVIN_BASE}/validation", chunk_size=CHUNK_SIZE,
+                           image_size=IMAGE_SIZE)
     print(f"Train samples: {len(train_ds)}, Val samples: {len(val_ds)}")
     collate_fn = make_calvin_collate_fn(processor, SYSTEM_PROMPT, max_length=spec.max_length,
                                         collate_style=spec.collate_style)
@@ -111,14 +115,14 @@ def main():
         optimizer, max_lr=LR, total_steps=NUM_STEPS,
         pct_start=WARMUP_STEPS / NUM_STEPS, anneal_strategy="cos",
     )
-    huber_fn = nn.SmoothL1Loss()  # Huber loss: less sensitive to outlier actions than MSE
+    huber_fn = nn.SmoothL1Loss()
     bce_fn = nn.BCEWithLogitsLoss()
 
     def loss_fn(pred, gt):
         pose_loss = huber_fn(pred[:, :, :6], gt[:, :, :6])
-        gripper_target = (gt[:, :, 6] + 1) / 2
+        gripper_target = (gt[:, :, 6] + 1) / 2  # {-1, 1} -> {0, 1}
         gripper_loss = bce_fn(pred[:, :, 6], gripper_target)
-        return pose_loss + gripper_loss
+        return pose_loss + GRIPPER_LOSS_WEIGHT * gripper_loss
 
     print(f"\nTraining: {len(train_ds)} samples, {len(val_ds)} val, "
           f"{NUM_STEPS} steps, chunk_size={CHUNK_SIZE}\n")

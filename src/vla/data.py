@@ -1,5 +1,6 @@
 """CALVIN dataset and collate function for VLM-based behavioral cloning."""
 
+import random
 from pathlib import Path
 
 import numpy as np
@@ -7,7 +8,17 @@ import torch
 from PIL import Image
 from torch.utils.data import Dataset
 
-from vla.config import ACTION_TOKEN
+from vla.config import ACTION_TOKEN, IMAGE_SIZE, RGB_PAD
+
+
+def random_shift(image: Image.Image, pad: int) -> Image.Image:
+    """Random spatial shift with zero-padding (matches VLM4VLA's RandomShiftsAug)."""
+    w, h = image.size
+    padded = Image.new("RGB", (w + 2 * pad, h + 2 * pad))
+    padded.paste(image, (pad, pad))
+    dx = random.randint(0, 2 * pad)
+    dy = random.randint(0, 2 * pad)
+    return padded.crop((dx, dy, dx + w, dy + h))
 
 
 class CALVINDataset(Dataset):
@@ -23,11 +34,15 @@ class CALVINDataset(Dataset):
         chunk_size: int = 1,
         action_key: str = "rel_actions",
         image_key: str = "rgb_static",
+        image_size: int = IMAGE_SIZE,
+        rgb_pad: int = 0,
     ):
         self.dataset_dir = Path(dataset_dir)
         self.chunk_size = chunk_size
         self.action_key = action_key
         self.image_key = image_key
+        self.image_size = image_size
+        self.rgb_pad = rgb_pad
         self.sharded = any(self.dataset_dir.glob("ep_*"))
 
         ann = np.load(
@@ -61,6 +76,9 @@ class CALVINDataset(Dataset):
         image = Image.fromarray(
             np.load(self._episode_path(frame_id))[self.image_key]
         )
+        image = image.resize((self.image_size, self.image_size), Image.BICUBIC)
+        if self.rgb_pad > 0:
+            image = random_shift(image, self.rgb_pad)
 
         # Load action chunk: actions from frame_id to frame_id + chunk_size - 1
         actions = []
