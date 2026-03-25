@@ -12,7 +12,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from transformers import AutoModelForImageTextToText, AutoProcessor
 
-from vla import VLA, ACTION_TOKEN, CHUNK_SIZE, MAX_LENGTH, MODEL_REGISTRY, SYSTEM_PROMPT
+from vla import VLA, ACTION_TOKEN, CHUNK_SIZE, MODEL_REGISTRY, SYSTEM_PROMPT
 from vla.config import ACTION_DIM
 from vla.data import CALVINDataset, make_calvin_collate_fn
 
@@ -62,7 +62,7 @@ def main():
         "calvin_base": CALVIN_BASE,
         "batch_size": BATCH_SIZE, "num_steps": NUM_STEPS, "lr": LR,
         "warmup_steps": WARMUP_STEPS, "grad_clip": GRAD_CLIP,
-        "action_dim": ACTION_DIM, "chunk_size": CHUNK_SIZE, "max_length": MAX_LENGTH,
+        "action_dim": ACTION_DIM, "chunk_size": CHUNK_SIZE, "max_length": spec.max_length,
     }
     with open(run_dir / "hparams.json", "w") as f:
         json.dump(hparams, f, indent=2)
@@ -97,7 +97,7 @@ def main():
     train_ds = CALVINDataset(f"{CALVIN_BASE}/training", chunk_size=CHUNK_SIZE)
     val_ds = CALVINDataset(f"{CALVIN_BASE}/validation", chunk_size=CHUNK_SIZE)
     print(f"Train samples: {len(train_ds)}, Val samples: {len(val_ds)}")
-    collate_fn = make_calvin_collate_fn(processor, SYSTEM_PROMPT, max_length=MAX_LENGTH,
+    collate_fn = make_calvin_collate_fn(processor, SYSTEM_PROMPT, max_length=spec.max_length,
                                         collate_style=spec.collate_style)
 
     train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_fn)

@@ -19,7 +19,7 @@ import torch
 from PIL import Image
 from transformers import AutoModelForImageTextToText, AutoProcessor
 
-from vla import VLA, ACTION_TOKEN, CHUNK_SIZE, MAX_LENGTH, MODEL_REGISTRY, SYSTEM_PROMPT
+from vla import VLA, ACTION_TOKEN, CHUNK_SIZE, MODEL_REGISTRY, SYSTEM_PROMPT
 from vla.config import ACTION_DIM
 
 
@@ -45,7 +45,7 @@ def load_checkpoint(ckpt_dir: Path, device: str, spec):
     return vla, processor
 
 
-def preprocess(image: Image.Image, instruction: str, processor, collate_style: str, device: str):
+def preprocess(image: Image.Image, instruction: str, processor, collate_style: str, device: str, max_length: int = 512):
     """Build VLM inputs from a single image + instruction, matching training collate."""
     tok = processor.tokenizer if hasattr(processor, "tokenizer") else processor
     action_token_id = tok.convert_tokens_to_ids(ACTION_TOKEN)
@@ -56,7 +56,7 @@ def preprocess(image: Image.Image, instruction: str, processor, collate_style: s
             images=[image],
             return_tensors="pt",
             truncation=True,
-            max_length=MAX_LENGTH,
+            max_length=max_length,
         )
         return {k: v.to(device) for k, v in vlm_inputs.items()}
 
@@ -76,7 +76,7 @@ def preprocess(image: Image.Image, instruction: str, processor, collate_style: s
         return_dict=True,
         return_tensors="pt",
         truncation=True,
-        max_length=MAX_LENGTH,
+        max_length=max_length,
     )
 
     # Append <action> token before padding (same logic as collate in vla/data.py)
@@ -112,12 +112,12 @@ def postprocess(pred_chunk: torch.Tensor) -> list[list[float]]:
     return actions
 
 
-def handle_request(data: dict, vla, processor, collate_style: str, device: str) -> dict:
+def handle_request(data: dict, vla, processor, collate_style: str, device: str, max_length: int = 512) -> dict:
     img_bytes = base64.b64decode(data["image"])
     image = Image.open(io.BytesIO(img_bytes)).convert("RGB")
     instruction = data["instruction"]
 
-    vlm_inputs = preprocess(image, instruction, processor, collate_style, device)
+    vlm_inputs = preprocess(image, instruction, processor, collate_style, device, max_length=max_length)
 
     with torch.no_grad():
         pred = vla(**vlm_inputs)  # (1, chunk_size, 7)
@@ -139,7 +139,7 @@ def recv_line(conn: socket.socket, buf: bytearray) -> str | None:
     return line
 
 
-def serve(vla, processor, collate_style: str, device: str, port: int):
+def serve(vla, processor, collate_style: str, device: str, port: int, max_length: int = 512):
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind(("localhost", port))
@@ -162,7 +162,7 @@ def serve(vla, processor, collate_style: str, device: str, port: int):
                     conn.close()
                     server.close()
                     return
-                response = handle_request(request, vla, processor, collate_style, device)
+                response = handle_request(request, vla, processor, collate_style, device, max_length=max_length)
                 conn.sendall(json.dumps(response).encode() + b"\n")
         except Exception as e:
             print(f"Error handling request: {e}")
@@ -182,7 +182,7 @@ def main():
 
     spec = MODEL_REGISTRY[args.model]
     vla, processor = load_checkpoint(Path(args.checkpoint), args.device, spec)
-    serve(vla, processor, spec.collate_style, args.device, args.port)
+    serve(vla, processor, spec.collate_style, args.device, args.port, max_length=spec.max_length)
 
 
 if __name__ == "__main__":

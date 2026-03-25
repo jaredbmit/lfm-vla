@@ -77,7 +77,7 @@ class CALVINDataset(Dataset):
         }
 
 
-def make_calvin_collate_fn(processor, system_prompt: str, max_length: int = 256,
+def make_calvin_collate_fn(processor, system_prompt: str, max_length: int = 512,
                            collate_style: str = "chat_template"):
     """Returns a collate function that formats CALVIN samples for a VLM.
 

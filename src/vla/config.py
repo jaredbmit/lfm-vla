@@ -12,7 +12,7 @@ SYSTEM_PROMPT = (
 
 ACTION_DIM = 7
 CHUNK_SIZE = 10
-MAX_LENGTH = 256
+MAX_LENGTH = 512
 
 
 @dataclass
@@ -22,6 +22,7 @@ class ModelSpec:
     model_kwargs: dict
     processor_kwargs: dict
     collate_style: str  # "chat_template" | "paligemma"
+    max_length: int = MAX_LENGTH
 
 
 MODEL_REGISTRY: dict[str, ModelSpec] = {
