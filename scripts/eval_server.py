@@ -85,14 +85,23 @@ def preprocess(image: Image.Image, instruction: str, processor, collate_style: s
     B, S = ids.shape
     new_ids = torch.full((B, S + 1), tok.pad_token_id, dtype=ids.dtype)
     new_mask = torch.zeros((B, S + 1), dtype=mask.dtype)
+    seq_keys = [k for k, v in vlm_inputs.items()
+                if isinstance(v, torch.Tensor) and v.shape == (B, S)
+                and k not in ("input_ids", "attention_mask")]
+    new_seq = {k: torch.zeros((B, S + 1), dtype=vlm_inputs[k].dtype) for k in seq_keys}
     for i in range(B):
         real_len = mask[i].sum().item()
         new_ids[i, :real_len] = ids[i, :real_len]
         new_ids[i, real_len] = action_token_id
         new_ids[i, real_len + 1:] = ids[i, real_len:]
         new_mask[i, :real_len + 1] = 1
+        for k in seq_keys:
+            new_seq[k][i, :real_len] = vlm_inputs[k][i, :real_len]
+            new_seq[k][i, real_len + 1:] = vlm_inputs[k][i, real_len:]
     vlm_inputs["input_ids"] = new_ids
     vlm_inputs["attention_mask"] = new_mask
+    for k in seq_keys:
+        vlm_inputs[k] = new_seq[k]
 
     return {k: v.to(device) for k, v in vlm_inputs.items()}
 
