@@ -10,4 +10,6 @@ dependencies = [
     "numpy",
     "pillow",
     "tqdm",
+    "matplotlib",
+    "pandas",
 ]

@@ -12,24 +12,30 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from transformers import AutoModelForImageTextToText, AutoProcessor
+from peft import LoraConfig, get_peft_model
 
 from vla import VLA, ACTION_TOKEN, CHUNK_SIZE, MODEL_REGISTRY, SYSTEM_PROMPT
-from vla.config import ACTION_DIM, GRIPPER_LOSS_WEIGHT, IMAGE_SIZE, RGB_PAD
+from vla.config import ACTION_DIM, GRIPPER_LOSS_WEIGHT, RGB_PAD
 from vla.data import CALVINDataset, make_calvin_collate_fn
 
 # CALVIN_BASE = "/home/jared/drl/calvin/dataset/task_D_D_annotated"
 CALVIN_BASE = "/home/jared/drl/calvin/dataset/calvin_debug_dataset"
 RUN_DIR = "/home/jared/lfm-vla/runs"
 
-BATCH_SIZE = 32
-NUM_STEPS = 20000
+# HPPs
+BATCH_SIZE = 1
+GRAD_STEPS = 4  # gradient accumulation steps
+NUM_STEPS = 30000
 LOG_EVERY = 100
-EVAL_EVERY = 2000
+EVAL_EVERY = 3000
 SAVE_EVERY = EVAL_EVERY
-MAX_VAL_BATCHES = 200
+MAX_VAL_BATCHES = 500
 LR = 1e-5
-WARMUP_STEPS = 100  # linear warmup before cosine decay
+WARMUP_STEPS = 1000  # linear warmup before cosine decay
 GRAD_CLIP = 1.0
+LORA_R = 8
+LORA_ALPHA = 16
+LORA_DROPOUT = 0.05
 
 
 def save_checkpoint(run_dir: Path, tag: str, vla, processor, step, val_loss):
@@ -57,16 +63,20 @@ def main():
     run_dir.mkdir(parents=True, exist_ok=True)
 
     parser = argparse.ArgumentParser(description="Train a VLA policy on CALVIN")
-    parser.add_argument("--model", default="lfm2", choices=list(MODEL_REGISTRY),
-                        help="VLM backbone to use (default: lfm2)")
+    parser.add_argument("--model", default="LFM2-VL-450M", choices=list(MODEL_REGISTRY),
+                        help="VLM backbone to use (default: LFM2-VL-450M)")
+    parser.add_argument("--finetune", default="lora", choices=["full", "lora"],
+                        help="Finetuning mode: full or lora (default: lora)")
     args = parser.parse_args()
     spec = MODEL_REGISTRY[args.model]
+    use_lora = args.finetune == "lora"
 
     hparams = {
         "model": args.model, "model_id": spec.model_id,
         "calvin_base": CALVIN_BASE,
-        "batch_size": BATCH_SIZE, "num_steps": NUM_STEPS, "lr": LR,
+        "batch_size": BATCH_SIZE, "grad_steps": GRAD_STEPS, "num_steps": NUM_STEPS, "lr": LR,
         "warmup_steps": WARMUP_STEPS, "grad_clip": GRAD_CLIP,
+        "finetune": args.finetune,
         "action_dim": ACTION_DIM, "chunk_size": CHUNK_SIZE, "max_length": spec.max_length,
     }
     with open(run_dir / "hparams.json", "w") as f:
@@ -91,18 +101,31 @@ def main():
     )
     vlm.resize_token_embeddings(len(tok))
 
+    if use_lora:
+        lora_cfg = LoraConfig(
+            r=LORA_R,
+            lora_alpha=LORA_ALPHA,
+            lora_dropout=LORA_DROPOUT,
+            bias="none",
+            target_modules=spec.lora_targets,
+            task_type="CAUSAL_LM",
+        )
+        vlm = get_peft_model(vlm, lora_cfg)
+    print("VLM trainable params: ")
+    vlm.print_trainable_parameters()
+
     device = next(vlm.parameters()).device
     action_token_id = tok.convert_tokens_to_ids(ACTION_TOKEN)
     vla = VLA(vlm, action_token_id=action_token_id, hidden_dim=spec.hidden_dim, chunk_size=CHUNK_SIZE).to(device)
 
     trainable = sum(p.numel() for p in vla.parameters() if p.requires_grad)
     total = sum(p.numel() for p in vla.parameters())
+    print("VLA trainable params: ")
     print(f"Trainable: {trainable:,} / {total:,} params ({100 * trainable / total:.2f}%)")
 
     train_ds = CALVINDataset(f"{CALVIN_BASE}/training", chunk_size=CHUNK_SIZE,
-                             image_size=IMAGE_SIZE, rgb_pad=RGB_PAD)
-    val_ds = CALVINDataset(f"{CALVIN_BASE}/validation", chunk_size=CHUNK_SIZE,
-                           image_size=IMAGE_SIZE)
+                             rgb_pad=RGB_PAD)
+    val_ds = CALVINDataset(f"{CALVIN_BASE}/validation", chunk_size=CHUNK_SIZE)
     print(f"Train samples: {len(train_ds)}, Val samples: {len(val_ds)}")
     collate_fn = make_calvin_collate_fn(processor, SYSTEM_PROMPT, max_length=spec.max_length,
                                         collate_style=spec.collate_style)
@@ -125,15 +148,17 @@ def main():
         return pose_loss + GRIPPER_LOSS_WEIGHT * gripper_loss
 
     print(f"\nTraining: {len(train_ds)} samples, {len(val_ds)} val, "
-          f"{NUM_STEPS} steps, chunk_size={CHUNK_SIZE}\n")
+          f"{NUM_STEPS} steps, grad_steps={GRAD_STEPS}, chunk_size={CHUNK_SIZE}\n")
 
     vla.train()
+    optimizer.zero_grad()
     train_iter = iter(train_loader)
-    running_loss = 0.0
+    running_loss = 0.0  # sum of raw losses over micro-steps, reset every LOG_EVERY optimizer steps
+    update_step = 1
     best_val_loss = float("inf")
     start_time = time.time()
 
-    for step in range(1, NUM_STEPS + 1):
+    for micro_step in range(1, NUM_STEPS * GRAD_STEPS + 1):
         try:
             batch = next(train_iter)
         except StopIteration:
@@ -143,27 +168,27 @@ def main():
         gt_actions = batch.pop("gt_actions").to(device)
         batch = {k: v.to(device) for k, v in batch.items()}
 
-        pred_actions = vla(**batch)
-        loss = loss_fn(pred_actions, gt_actions)
+        loss = loss_fn(vla(**batch), gt_actions)
+        (loss / GRAD_STEPS).backward()
+        running_loss += loss.item()
 
-        optimizer.zero_grad()
-        loss.backward()
+        if micro_step % GRAD_STEPS != 0:
+            continue
+
         torch.nn.utils.clip_grad_norm_(vla.parameters(), GRAD_CLIP)
         optimizer.step()
         scheduler.step()
+        optimizer.zero_grad()
 
-        running_loss += loss.item()
-
-        if step % LOG_EVERY == 0:
-            avg_loss = running_loss / LOG_EVERY
+        if update_step % LOG_EVERY == 0:
+            avg_loss = running_loss / (LOG_EVERY * GRAD_STEPS)
             elapsed = time.time() - start_time
-            current_lr = scheduler.get_last_lr()[0]
-            print(f"  step {step:5d}  train_loss={avg_loss:.6f}  lr={current_lr:.2e}  [{elapsed:.0f}s]")
-            csv_writer.writerow([step, f"{avg_loss:.6f}", "", f"{elapsed:.1f}"])
+            print(f"  step {update_step:5d}  train_loss={avg_loss:.6f}  lr={scheduler.get_last_lr()[0]:.2e}  [{elapsed:.0f}s]")
+            csv_writer.writerow([update_step, f"{avg_loss:.6f}", "", f"{elapsed:.1f}"])
             log_file.flush()
             running_loss = 0.0
 
-        if step % EVAL_EVERY == 0:
+        if update_step % EVAL_EVERY == 0:
             vla.eval()
             val_loss_sum = 0.0
             val_steps = 0
@@ -178,37 +203,23 @@ def main():
             val_loss = val_loss_sum / val_steps
             elapsed = time.time() - start_time
             print(f"           val_loss={val_loss:.6f}")
-            csv_writer.writerow([step, "", f"{val_loss:.6f}", f"{elapsed:.1f}"])
+            csv_writer.writerow([update_step, "", f"{val_loss:.6f}", f"{elapsed:.1f}"])
             log_file.flush()
 
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
-                save_checkpoint(run_dir, "best", vla, processor, step, val_loss)
+                save_checkpoint(run_dir, "best", vla, processor, update_step, val_loss)
 
             vla.train()
 
-        if step % SAVE_EVERY == 0:
-            save_checkpoint(run_dir, f"step_{step}", vla, processor, step, best_val_loss)
+        if update_step % SAVE_EVERY == 0:
+            save_checkpoint(run_dir, f"step_{update_step}", vla, processor, update_step, best_val_loss)
+            
+        update_step += 1
 
     save_checkpoint(run_dir, "final", vla, processor, NUM_STEPS, best_val_loss)
 
     log_file.close()
-
-    # Final check
-    vla.eval()
-    batch = next(iter(val_loader))
-    gt_actions = batch.pop("gt_actions").to(device)
-    batch = {k: v.to(device) for k, v in batch.items()}
-
-    with torch.no_grad():
-        pred_actions = vla(**batch)
-
-    print(f"\nSample predictions (first action in chunk) vs ground truth:")
-    for i in range(min(4, pred_actions.shape[0])):
-        pred = pred_actions[i, 0].cpu().tolist()
-        gt = gt_actions[i, 0].cpu().tolist()
-        print(f"  [{i}] pred: [{', '.join(f'{x:+.3f}' for x in pred)}]")
-        print(f"      gt:   [{', '.join(f'{x:+.3f}' for x in gt)}]")
 
     elapsed = time.time() - start_time
     print(f"\nTotal training time: {elapsed:.0f}s ({elapsed/3600:.1f}h)")

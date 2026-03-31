@@ -8,7 +8,7 @@ import torch
 from PIL import Image
 from torch.utils.data import Dataset
 
-from vla.config import ACTION_TOKEN, IMAGE_SIZE, RGB_PAD
+from vla.config import ACTION_TOKEN, RGB_PAD
 
 
 def random_shift(image: Image.Image, pad: int) -> Image.Image:
@@ -34,14 +34,12 @@ class CALVINDataset(Dataset):
         chunk_size: int = 1,
         action_key: str = "rel_actions",
         image_key: str = "rgb_static",
-        image_size: int = IMAGE_SIZE,
         rgb_pad: int = 0,
     ):
         self.dataset_dir = Path(dataset_dir)
         self.chunk_size = chunk_size
         self.action_key = action_key
         self.image_key = image_key
-        self.image_size = image_size
         self.rgb_pad = rgb_pad
         self.sharded = any(self.dataset_dir.glob("ep_*"))
 
@@ -76,7 +74,6 @@ class CALVINDataset(Dataset):
         image = Image.fromarray(
             np.load(self._episode_path(frame_id))[self.image_key]
         )
-        image = image.resize((self.image_size, self.image_size), Image.BICUBIC)
         if self.rgb_pad > 0:
             image = random_shift(image, self.rgb_pad)
 
@@ -95,21 +92,53 @@ class CALVINDataset(Dataset):
         }
 
 
+def _insert_token(vlm_inputs: dict, token_id: int, pad_token_id: int) -> dict:
+    """Insert a token at the end of each sequence's real content (before padding).
+
+    Expands input_ids, attention_mask, and any other (B, S)-shaped tensors by one
+    position per sequence.
+    """
+    ids = vlm_inputs["input_ids"]
+    mask = vlm_inputs["attention_mask"]
+    B, S = ids.shape
+    new_ids = torch.full((B, S + 1), pad_token_id, dtype=ids.dtype)
+    new_mask = torch.zeros((B, S + 1), dtype=mask.dtype)
+    seq_keys = [k for k, v in vlm_inputs.items()
+                if isinstance(v, torch.Tensor) and v.shape == (B, S)
+                and k not in ("input_ids", "attention_mask")]
+    new_seq = {k: torch.zeros((B, S + 1), dtype=vlm_inputs[k].dtype) for k in seq_keys}
+    for i in range(B):
+        real_len = mask[i].sum().item()
+        new_ids[i, :real_len] = ids[i, :real_len]
+        new_ids[i, real_len] = token_id
+        new_ids[i, real_len + 1:] = ids[i, real_len:]
+        new_mask[i, :real_len + 1] = 1
+        for k in seq_keys:
+            new_seq[k][i, :real_len] = vlm_inputs[k][i, :real_len]
+            new_seq[k][i, real_len + 1:] = vlm_inputs[k][i, real_len:]
+    vlm_inputs["input_ids"] = new_ids
+    vlm_inputs["attention_mask"] = new_mask
+    for k in seq_keys:
+        vlm_inputs[k] = new_seq[k]
+    return vlm_inputs
+
+
 def make_calvin_collate_fn(processor, system_prompt: str, max_length: int = 512,
                            collate_style: str = "chat_template"):
     """Returns a collate function that formats CALVIN samples for a VLM.
 
+    Both styles tokenize the image + instruction, then insert the <action> token
+    post-tokenization at the end of real content (before padding).
+
     collate_style="chat_template": builds system+user conversations, tokenizes via
-        apply_chat_template, and appends the <action> token before padding.
-    collate_style="paligemma": uses the PaliGemma processor directly, appending
-        the <action> token to the instruction text.
+        apply_chat_template (LFM, Qwen).
+    collate_style="paligemma": uses the PaliGemma processor directly.
     """
     tok = processor.tokenizer if hasattr(processor, "tokenizer") else processor
     action_token_id = tok.convert_tokens_to_ids(ACTION_TOKEN)
 
-    def collate_chat_template(batch):
+    def _tokenize_chat_template(batch):
         conversations = []
-        action_chunks = []
         for sample in batch:
             conversations.append([
                 {"role": "system", "content": [{"type": "text", "text": system_prompt}]},
@@ -118,9 +147,7 @@ def make_calvin_collate_fn(processor, system_prompt: str, max_length: int = 512,
                     {"type": "text", "text": sample["instruction"]},
                 ]},
             ])
-            action_chunks.append(sample["action_chunk"])
-
-        vlm_inputs = processor.apply_chat_template(
+        return processor.apply_chat_template(
             conversations,
             add_generation_prompt=True,
             tokenize=True,
@@ -131,50 +158,22 @@ def make_calvin_collate_fn(processor, system_prompt: str, max_length: int = 512,
             max_length=max_length,
         )
 
-        # Insert <action> token at the end of each sequence's real content (before padding)
-        ids = vlm_inputs["input_ids"]
-        mask = vlm_inputs["attention_mask"]
-        B, S = ids.shape
-        new_ids = torch.full((B, S + 1), tok.pad_token_id, dtype=ids.dtype)
-        new_mask = torch.zeros((B, S + 1), dtype=mask.dtype)
-        # Expand other sequence-length tensors (e.g. Qwen's mm_token_type_ids)
-        seq_keys = [k for k, v in vlm_inputs.items()
-                    if isinstance(v, torch.Tensor) and v.shape == (B, S)
-                    and k not in ("input_ids", "attention_mask")]
-        new_seq = {k: torch.zeros((B, S + 1), dtype=vlm_inputs[k].dtype) for k in seq_keys}
-        for i in range(B):
-            real_len = mask[i].sum().item()
-            new_ids[i, :real_len] = ids[i, :real_len]
-            new_ids[i, real_len] = action_token_id
-            new_ids[i, real_len + 1:] = ids[i, real_len:]
-            new_mask[i, :real_len + 1] = 1
-            for k in seq_keys:
-                new_seq[k][i, :real_len] = vlm_inputs[k][i, :real_len]
-                new_seq[k][i, real_len + 1:] = vlm_inputs[k][i, real_len:]
-        vlm_inputs["input_ids"] = new_ids
-        vlm_inputs["attention_mask"] = new_mask
-        for k in seq_keys:
-            vlm_inputs[k] = new_seq[k]
-        vlm_inputs["gt_actions"] = torch.stack(action_chunks)
-        return vlm_inputs
-
-    def collate_paligemma(batch):
-        # PaliGemma uses processor(text, images) directly — no chat template.
-        # Append <action> token to the instruction text so it ends up in the prefix
-        # with bidirectional attention, attending to both image and language tokens.
-        texts = [f"<image>\n{s['instruction']}\n{ACTION_TOKEN}" for s in batch]
-        images = [s["image"] for s in batch]
-        action_chunks = [s["action_chunk"] for s in batch]
-
-        vlm_inputs = processor(
-            text=texts,
-            images=images,
+    def _tokenize_paligemma(batch):
+        return processor(
+            text=[s["instruction"] for s in batch],
+            images=[s["image"] for s in batch],
             return_tensors="pt",
             padding=True,
             truncation=True,
             max_length=max_length,
         )
-        vlm_inputs["gt_actions"] = torch.stack(action_chunks)
+
+    tokenize = _tokenize_chat_template if collate_style == "chat_template" else _tokenize_paligemma
+
+    def collate(batch):
+        vlm_inputs = tokenize(batch)
+        _insert_token(vlm_inputs, action_token_id, tok.pad_token_id)
+        vlm_inputs["gt_actions"] = torch.stack([s["action_chunk"] for s in batch])
         return vlm_inputs
 
-    return collate_chat_template if collate_style == "chat_template" else collate_paligemma
+    return collate
