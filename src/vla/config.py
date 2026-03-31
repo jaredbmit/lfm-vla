@@ -5,10 +5,8 @@ from dataclasses import dataclass
 import torch
 
 ACTION_TOKEN = "<action>"
-SYSTEM_PROMPT = (
-    "You are a robot manipulation agent. Given an image of the current scene "
-    "and a language instruction, predict the next action to execute."
-)
+SYSTEM_PROMPT = "You are a helpful assistant."
+INSTRUCTION_PREPROMPT = "What action should the robotic arm take to "
 
 ACTION_DIM = 7
 CHUNK_SIZE = 10

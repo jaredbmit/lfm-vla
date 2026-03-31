@@ -22,7 +22,7 @@ CALVIN_BASE = "/home/jared/drl/calvin/dataset/calvin_debug_dataset"
 RUN_DIR = "/home/jared/lfm-vla/runs"
 
 # HPPs
-BATCH_SIZE = 8
+BATCH_SIZE = 1
 GRAD_STEPS = 1  # gradient accumulation steps
 NUM_STEPS = 30000
 LOG_EVERY = 100
@@ -77,7 +77,7 @@ def main():
     log_path = run_dir / "metrics.csv"
     log_file = open(log_path, "w", newline="")
     csv_writer = csv.writer(log_file)
-    csv_writer.writerow(["step", "train_loss", "val_loss", "elapsed_sec"])
+    csv_writer.writerow(["step", "train_loss", "val_loss", "elapsed_sec", "gpu_mem_mib"])
 
     print(f"Run directory: {run_dir}")
     print(f"Model: {spec.model_id}")
@@ -163,8 +163,10 @@ def main():
         if update_step % LOG_EVERY == 0:
             avg_loss = running_loss / (LOG_EVERY * GRAD_STEPS)
             elapsed = time.time() - start_time
-            print(f"  step {update_step:5d}  train_loss={avg_loss:.6f}  lr={scheduler.get_last_lr()[0]:.2e}  [{elapsed:.0f}s]")
-            csv_writer.writerow([update_step, f"{avg_loss:.6f}", "", f"{elapsed:.1f}"])
+            gpu_mib = torch.cuda.max_memory_allocated(device) // (1024 * 1024)
+            torch.cuda.reset_peak_memory_stats(device)
+            print(f"  step {update_step:5d}  train_loss={avg_loss:.6f}  lr={scheduler.get_last_lr()[0]:.2e}  gpu={gpu_mib}MiB  [{elapsed:.0f}s]")
+            csv_writer.writerow([update_step, f"{avg_loss:.6f}", "", f"{elapsed:.1f}", gpu_mib])
             log_file.flush()
             running_loss = 0.0
 
@@ -199,12 +201,38 @@ def main():
 
     save_checkpoint(run_dir, "final", vla, processor, NUM_STEPS, best_val_loss)
 
-    log_file.close()
-
     elapsed = time.time() - start_time
     print(f"\nTotal training time: {elapsed:.0f}s ({elapsed/3600:.1f}h)")
     print(f"Best val loss: {best_val_loss:.6f}")
     print(f"Run saved to: {run_dir}")
+
+    # Inference latency benchmark (batch size 1)
+    print("\nMeasuring inference latency (batch_size=1)...")
+    vla.eval()
+    single_loader = DataLoader(val_ds, batch_size=1, shuffle=False, collate_fn=collate_fn)
+    single_batch = next(iter(single_loader))
+    single_batch.pop("gt_actions")
+    single_batch = {k: v.to(device) for k, v in single_batch.items()}
+
+    WARMUP = 10
+    MEASURE = 50
+    with torch.no_grad():
+        for _ in range(WARMUP):
+            vla(**single_batch)
+        torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        for _ in range(MEASURE):
+            vla(**single_batch)
+        torch.cuda.synchronize()
+        t1 = time.perf_counter()
+    ms_per_step = (t1 - t0) / MEASURE * 1000
+    print(f"Inference latency: {ms_per_step:.1f} ms/sample ({1000/ms_per_step:.1f} Hz)")
+
+    with open(run_dir / "inference_latency.json", "w") as f:
+        json.dump({"ms_per_sample": round(ms_per_step, 3), "hz": round(1000 / ms_per_step, 2),
+                   "warmup_steps": WARMUP, "measure_steps": MEASURE}, f, indent=2)
+
+    log_file.close()
 
 
 if __name__ == "__main__":

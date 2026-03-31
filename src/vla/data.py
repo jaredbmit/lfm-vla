@@ -8,7 +8,7 @@ import torch
 from PIL import Image
 from torch.utils.data import Dataset
 
-from vla.config import ACTION_TOKEN, RGB_PAD
+from vla.config import ACTION_TOKEN, RGB_PAD, INSTRUCTION_PREPROMPT
 
 
 def random_shift(image: Image.Image, pad: int) -> Image.Image:
@@ -144,7 +144,7 @@ def make_calvin_collate_fn(processor, system_prompt: str, max_length: int = 512,
                 {"role": "system", "content": [{"type": "text", "text": system_prompt}]},
                 {"role": "user", "content": [
                     {"type": "image", "image": sample["image"]},
-                    {"type": "text", "text": sample["instruction"]},
+                    {"type": "text", "text": INSTRUCTION_PREPROMPT + sample["instruction"]},
                 ]},
             ])
         return processor.apply_chat_template(
@@ -159,8 +159,9 @@ def make_calvin_collate_fn(processor, system_prompt: str, max_length: int = 512,
         )
 
     def _tokenize_paligemma(batch):
+        texts = [f"<image>{s['instruction']}\n" for s in batch]
         return processor(
-            text=[s["instruction"] for s in batch],
+            text=texts,
             images=[s["image"] for s in batch],
             return_tensors="pt",
             padding=True,
