@@ -96,8 +96,7 @@ def load_hparams(model_dir: Path) -> dict:
 def smooth(values, window=20):
     if len(values) < window:
         return values
-    kernel = np.ones(window) / window
-    return np.convolve(values, kernel, mode="same")
+    return pd.Series(values).rolling(window, min_periods=1, center=True).mean().to_numpy()
 
 
 def avg_chain_sr(chain_sr: dict) -> float:
