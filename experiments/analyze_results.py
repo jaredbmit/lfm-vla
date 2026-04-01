@@ -30,9 +30,15 @@ MODEL_LABELS = {
 }
 
 MODEL_COLORS = {
-    "paligemma": "#4C72B0",
-    "lfm":       "#DD8452",
-    "qwen":      "#55A868",
+    "paligemma2-3b-mix-224":  "#963AD3",
+    "LFM2-VL-450M":           "#77BDD3",
+    "LFM2-VL-1.6B":           "#4A7AC2",
+    "LFM2-VL-3B":             "#3844B8",
+    "Qwen3-VL-2B-Instruct":   "#6BAC7A",
+    "Qwen3-VL-4B-Instruct":   "#1C810F",
+    "SmolVLM-256M-Instruct":  "#CFA061",
+    "SmolVLM-500M-Instruct":  "#DA8540",
+    "SmolVLM-Instruct":       "#E06F12",
 }
 
 # eval dirs may be named eval_XXXX or log_step_XXXX
@@ -109,11 +115,11 @@ def report_training_times(models_data: dict):
     for model, data in models_data.items():
         df = data.get("metrics")
         if df is None:
-            rows.append((MODEL_LABELS[model], "N/A", "N/A", "N/A", "N/A"))
+            rows.append((model, "N/A", "N/A", "N/A", "N/A"))
             continue
         train_df = df[df["train_loss"].notna()].copy()
         if train_df.empty:
-            rows.append((MODEL_LABELS[model], "N/A", "N/A", "N/A", "N/A"))
+            rows.append((model, "N/A", "N/A", "N/A", "N/A"))
             continue
         elapsed = train_df["elapsed_sec"].values
         # step time = diff between consecutive elapsed values
@@ -125,7 +131,7 @@ def report_training_times(models_data: dict):
         steps = train_df["step"].values
         step_interval = int(np.median(np.diff(steps))) if len(steps) > 1 else 100
         rows.append((
-            MODEL_LABELS[model],
+            model,
             f"{total_h:.2f} h",
             f"{total_sec:.0f} s",
             f"{avg_step_sec:.2f} s",
@@ -166,7 +172,7 @@ def report_calvin_results(models_data: dict):
     print("-" * len(header))
 
     for model, data in models_data.items():
-        label = MODEL_LABELS[model]
+        label = model
         evals = data.get("evals", {})
         if not evals:
             print(f"{label:<20} {'(no evals)':>8}")
@@ -203,7 +209,7 @@ def plot_loss_curves(models_data: dict, out_dir: Path):
         df = data.get("metrics")
         if df is None:
             continue
-        label = MODEL_LABELS[model]
+        label = model
         color = MODEL_COLORS[model]
 
         train_df = df[df["train_loss"].notna()].copy()
@@ -268,7 +274,7 @@ def plot_calvin_results(models_data: dict, out_dir: Path):
             sr_vals = [chain_sr.get(str(k), 0.0) * 100 for k in ks]
             offset = (i - n_models / 2 + 0.5) * bar_width
             bars = ax.bar(x + offset, sr_vals, bar_width * 0.9,
-                          label=MODEL_LABELS[model], color=MODEL_COLORS[model], alpha=0.85)
+                          label=model, color=MODEL_COLORS[model], alpha=0.85)
 
         ax.set_title(f"Step {step:,}", fontsize=11)
         ax.set_xticks(x)
@@ -302,7 +308,7 @@ def plot_sr1_over_steps(models_data: dict, out_dir: Path):
         sr1 = [evals[s].get("chain_sr", {}).get("1", float("nan")) * 100 for s in steps]
         avg_sr = [avg_chain_sr(evals[s].get("chain_sr", {})) * 100 for s in steps]
         color = MODEL_COLORS[model]
-        label = MODEL_LABELS[model]
+        label = model
         ax.plot(steps, sr1, "o-", color=color, linewidth=2, markersize=7, label=f"{label} (SR-1)")
         ax.plot(steps, avg_sr, "s--", color=color, linewidth=1.2, markersize=5,
                 alpha=0.6, label=f"{label} (avg SR)")
@@ -339,30 +345,44 @@ def main():
 
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # discover models
-    model_dirs = {d.name: d for d in sorted(runs_dir.iterdir()) if d.is_dir()}
-    if not model_dirs:
-        sys.exit(f"No model directories found under {runs_dir}")
+    # discover run directories
+    run_dirs = [d for d in sorted(runs_dir.iterdir()) if d.is_dir()]
+    if not run_dirs:
+        sys.exit(f"No run directories found under {runs_dir}")
 
-    print(f"Found models: {list(model_dirs.keys())}")
+    # group run dirs by model name from hparams.json
+    from collections import defaultdict
+    runs_by_model: dict[str, list[Path]] = defaultdict(list)
+    for d in run_dirs:
+        hp = load_hparams(d)
+        model_name = hp.get("model") or d.name
+        runs_by_model[model_name].append(d)
+
+    print(f"Found models: {list(runs_by_model.keys())}")
 
     models_data = {}
-    for model, mdir in model_dirs.items():
-        eval_dirs = find_eval_dirs(mdir)
-        evals = {}
-        for step, edir in eval_dirs.items():
-            result = load_eval(edir)
-            if result is not None:
-                evals[step] = result
+    for model, mdirs in runs_by_model.items():
+        merged_evals: dict = {}
+        merged_metrics = None
+        merged_hparams: dict = {}
+        for mdir in mdirs:
+            eval_dirs = find_eval_dirs(mdir)
+            for step, edir in eval_dirs.items():
+                result = load_eval(edir)
+                if result is not None:
+                    merged_evals[step] = result
+            if merged_metrics is None:
+                merged_metrics = load_metrics(mdir)
+            if not merged_hparams:
+                merged_hparams = load_hparams(mdir)
 
         models_data[model] = {
-            "metrics":  load_metrics(mdir),
-            "evals":    evals,
-            "hparams":  load_hparams(mdir),
+            "metrics":  merged_metrics,
+            "evals":    merged_evals,
+            "hparams":  merged_hparams,
         }
-        n_eval = len(evals)
-        has_metrics = models_data[model]["metrics"] is not None
-        print(f"  {model}: metrics={'yes' if has_metrics else 'no'}, evals={sorted(evals.keys())}")
+        has_metrics = merged_metrics is not None
+        print(f"  {model}: metrics={'yes' if has_metrics else 'no'}, evals={sorted(merged_evals.keys())}")
 
     # ── print tables ──
     report_training_times(models_data)
