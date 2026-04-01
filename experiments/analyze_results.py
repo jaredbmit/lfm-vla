@@ -16,6 +16,7 @@ import os
 import sys
 from pathlib import Path
 
+import matplotlib.animation as manimation
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import numpy as np
@@ -91,12 +92,6 @@ def load_hparams(model_dir: Path) -> dict:
         return {}
     with open(p) as f:
         return json.load(f)
-
-
-def smooth(values, window=20):
-    if len(values) < window:
-        return values
-    return pd.Series(values).rolling(window, min_periods=1, center=True).mean().to_numpy()
 
 
 def avg_chain_sr(chain_sr: dict) -> float:
@@ -217,8 +212,7 @@ def plot_loss_curves(models_data: dict, out_dir: Path):
         if not train_df.empty:
             steps = train_df["step"].values
             loss  = train_df["train_loss"].values
-            ax_train.plot(steps, loss, alpha=0.25, color=color, linewidth=0.8)
-            ax_train.plot(steps, smooth(loss, window=20), color=color, linewidth=1.8, label=label)
+            ax_train.plot(steps, loss, color=color, linewidth=1.8, label=label)
 
         if not val_df.empty:
             steps = val_df["step"].values
@@ -233,12 +227,108 @@ def plot_loss_curves(models_data: dict, out_dir: Path):
         ax.grid(True, alpha=0.3)
         ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"{int(x):,}"))
 
-    fig.suptitle("VLA Training Curves (CALVIN D→D)", fontsize=13, fontweight="bold")
+    ax_train.set_ylim(0.008, 0.035)
+    ax_val.set_ylim(0.01, 0.02)
+
+    fig.suptitle("VLA Training Curves (CALVIN ABC→D)", fontsize=13, fontweight="bold")
     fig.tight_layout()
     out_path = out_dir / "loss_curves.png"
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"\nSaved: {out_path}")
+
+
+def animate_loss_curves(models_data: dict, out_dir: Path, fps: int = 30,
+                        duration_s: int = 10):
+    """Render a gif of train + val loss curves growing over wallclock time."""
+    total_frames = fps * duration_s
+
+    # Gather per-model train and val data keyed by elapsed_sec
+    train_curves = {}  # model -> (elapsed, steps, loss)
+    val_curves = {}    # model -> (elapsed, steps, loss)
+    max_elapsed = 0.0
+    max_step = 0
+    for model, data in models_data.items():
+        df = data.get("metrics")
+        if df is None or "elapsed_sec" not in df.columns:
+            continue
+        train_df = df[df["train_loss"].notna()]
+        if not train_df.empty:
+            train_curves[model] = (
+                train_df["elapsed_sec"].values,
+                train_df["step"].values,
+                train_df["train_loss"].values,
+            )
+            max_elapsed = max(max_elapsed, train_df["elapsed_sec"].values[-1])
+            max_step = max(max_step, train_df["step"].values[-1])
+        val_df = df[df["val_loss"].notna()]
+        if not val_df.empty:
+            val_curves[model] = (
+                val_df["elapsed_sec"].values,
+                val_df["step"].values,
+                val_df["val_loss"].values,
+            )
+            max_elapsed = max(max_elapsed, val_df["elapsed_sec"].values[-1])
+            max_step = max(max_step, val_df["step"].values[-1])
+
+    if not train_curves and not val_curves:
+        print("No training data with elapsed_sec to animate.")
+        return
+
+    fig, axes = plt.subplots(1, 2, figsize=(13, 4.5))
+    ax_train, ax_val = axes
+
+    for ax, title in zip(axes, ["Training Loss", "Validation Loss"]):
+        ax.set_xlabel("Step")
+        ax.set_ylabel("Loss")
+        ax.set_title(title)
+        ax.set_xlim(0, max_step * 1.02)
+        ax.grid(True, alpha=0.3)
+        ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"{int(x):,}"))
+    ax_train.set_ylim(0.008, 0.035)
+    ax_val.set_ylim(0.01, 0.02)
+
+    train_lines = {}
+    val_lines = {}
+    all_models = sorted(set(train_curves) | set(val_curves))
+    for model in all_models:
+        color = MODEL_COLORS.get(model, None)
+        if model in train_curves:
+            line, = ax_train.plot([], [], color=color, linewidth=1.8, label=model)
+            train_lines[model] = line
+        if model in val_curves:
+            line, = ax_val.plot([], [], "o-", color=color, linewidth=1.8,
+                                markersize=5, label=model)
+            val_lines[model] = line
+    ax_train.legend(fontsize=9)
+    ax_val.legend(fontsize=9)
+    time_text = ax_train.text(0.98, 0.95, "", transform=ax_train.transAxes,
+                              ha="right", va="top", fontsize=11,
+                              fontfamily="monospace",
+                              bbox=dict(boxstyle="round,pad=0.3", fc="white",
+                                        alpha=0.8))
+    fig.suptitle("VLA Training Curves (CALVIN ABC→D)", fontsize=13, fontweight="bold")
+    fig.tight_layout()
+
+    artists = list(train_lines.values()) + list(val_lines.values()) + [time_text]
+
+    def update(frame):
+        t = (frame / total_frames) * max_elapsed
+        for model, (elapsed, steps, loss) in train_curves.items():
+            mask = elapsed <= t
+            train_lines[model].set_data(steps[mask], loss[mask])
+        for model, (elapsed, steps, loss) in val_curves.items():
+            mask = elapsed <= t
+            val_lines[model].set_data(steps[mask], loss[mask])
+        time_text.set_text(f"t = {t / 3600:.2f} h")
+        return artists
+
+    out_path = out_dir / "loss_curves_animated.gif"
+    writer = manimation.PillowWriter(fps=fps)
+    anim = manimation.FuncAnimation(fig, update, frames=total_frames, blit=True)
+    anim.save(str(out_path), writer=writer, dpi=150)
+    plt.close(fig)
+    print(f"Saved: {out_path}")
 
 
 def plot_calvin_results(models_data: dict, out_dir: Path):
@@ -389,6 +479,7 @@ def main():
 
     # ── plots ──
     plot_loss_curves(models_data, out_dir)
+    animate_loss_curves(models_data, out_dir)
     plot_calvin_results(models_data, out_dir)
     plot_sr1_over_steps(models_data, out_dir)
 
