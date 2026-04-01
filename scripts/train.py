@@ -22,8 +22,6 @@ CALVIN_BASE = "/home/jared/drl/calvin/dataset/calvin_debug_dataset"
 RUN_DIR = "/home/jared/lfm-vla/runs"
 
 # HPPs
-BATCH_SIZE = 1
-GRAD_STEPS = 1  # gradient accumulation steps
 NUM_STEPS = 30000
 LOG_EVERY = 100
 EVAL_EVERY = 3000
@@ -61,12 +59,12 @@ def main():
     parser = argparse.ArgumentParser(description="Train a VLA policy on CALVIN")
     parser.add_argument("--model", default="LFM2-VL-450M", choices=list(MODEL_REGISTRY),
                         help="VLM backbone to use (default: LFM2-VL-450M)")
-    parser.add_argument("--batch_size", type=int, default=BATCH_SIZE)
-    parser.add_argument("--grad_steps", type=int, default=GRAD_STEPS)
+    parser.add_argument("--batch_size", type=int, default=None)
+    parser.add_argument("--grad_steps", type=int, default=None)
     args = parser.parse_args()
     spec = MODEL_REGISTRY[args.model]
-    batch_size = args.batch_size
-    grad_steps = args.grad_steps
+    batch_size = args.batch_size if args.batch_size is not None else spec.default_batch_size
+    grad_steps = args.grad_steps if args.grad_steps is not None else spec.default_grad_steps
 
     hparams = {
         "model": args.model, "model_id": spec.model_id,

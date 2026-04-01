@@ -23,6 +23,8 @@ class ModelSpec:
     processor_kwargs: dict
     collate_style: str  # "chat_template" | "paligemma"
     max_length: int = MAX_LENGTH
+    default_batch_size: int = 128  # models >= 3B use 64
+    default_grad_steps: int = 1   # models >= 3B use 2
 
 
 MODEL_REGISTRY: dict[str, ModelSpec] = {
@@ -32,6 +34,8 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
         model_kwargs={"dtype": torch.bfloat16},
         processor_kwargs={},
         collate_style="chat_template",
+        default_batch_size=64,
+        default_grad_steps=2,
     ),
     "LFM2-VL-1.6B": ModelSpec(
         model_id="LiquidAI/LFM2-VL-1.6B",
@@ -53,6 +57,8 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
         model_kwargs={"dtype": torch.bfloat16},
         processor_kwargs={},
         collate_style="chat_template",
+        default_batch_size=64,
+        default_grad_steps=2,
     ),
     "Qwen3-VL-2B-Instruct": ModelSpec(
         model_id="Qwen/Qwen3-VL-2B-Instruct",
@@ -67,6 +73,8 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
         model_kwargs={"dtype": torch.bfloat16},
         processor_kwargs={},
         collate_style="chat_template",
+        default_batch_size=64,
+        default_grad_steps=2,
     ),
     "paligemma2-3b-mix-224": ModelSpec(
         model_id="google/paligemma2-3b-mix-224",
@@ -74,6 +82,8 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
         model_kwargs={"dtype": torch.bfloat16},
         processor_kwargs={},
         collate_style="paligemma",
+        default_batch_size=32,
+        default_grad_steps=4,
     ),
     # Base is 2B parameters
     "SmolVLM-Instruct": ModelSpec(
