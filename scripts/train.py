@@ -142,13 +142,21 @@ def main():
         from transformers.optimization import get_constant_schedule_with_warmup
         scheduler = get_constant_schedule_with_warmup(optimizer,
                                                       num_warmup_steps=args.warmup_steps)
-    huber_fn = nn.SmoothL1Loss()
-    bce_fn = nn.BCEWithLogitsLoss()
+    huber_fn = nn.SmoothL1Loss(reduction="none")
+    bce_fn = nn.BCEWithLogitsLoss(reduction="none")
 
-    def loss_fn(pred, gt):
-        pose_loss = huber_fn(pred[:, :, :6], gt[:, :, :6])
+    def loss_fn(pred, gt, action_mask):
+        # action_mask: (B, chunk_size) — 1 for valid, 0 for padded
+        # Expand mask for pose dims: (B, chunk, 1)
+        mask = action_mask.unsqueeze(-1)
+
+        pose_loss = huber_fn(pred[:, :, :6], gt[:, :, :6])  # (B, chunk, 6)
+        pose_loss = (pose_loss * mask).sum() / mask.sum() / 6
+
         gripper_target = (gt[:, :, 6] + 1) / 2  # {-1, 1} -> {0, 1}
-        gripper_loss = bce_fn(pred[:, :, 6], gripper_target)
+        gripper_loss = bce_fn(pred[:, :, 6], gripper_target)  # (B, chunk)
+        gripper_loss = (gripper_loss * action_mask).sum() / action_mask.sum()
+
         return pose_loss + GRIPPER_LOSS_WEIGHT * gripper_loss
 
     print(f"\nTraining: {len(train_ds)} samples, {len(val_ds)} val, "
@@ -170,9 +178,10 @@ def main():
             batch = next(train_iter)
 
         gt_actions = batch.pop("gt_actions").to(device)
+        act_mask = batch.pop("action_mask").to(device)
         batch = {k: v.to(device) for k, v in batch.items()}
 
-        loss = loss_fn(vla(**batch), gt_actions)
+        loss = loss_fn(vla(**batch), gt_actions, act_mask)
         (loss / grad_steps).backward()
         running_loss += loss.item()
 
@@ -201,8 +210,9 @@ def main():
             with torch.no_grad():
                 for val_batch in val_loader:
                     gt = val_batch.pop("gt_actions").to(device)
+                    val_mask = val_batch.pop("action_mask").to(device)
                     val_batch = {k: v.to(device) for k, v in val_batch.items()}
-                    val_loss_sum += loss_fn(vla(**val_batch), gt).item()
+                    val_loss_sum += loss_fn(vla(**val_batch), gt, val_mask).item()
                     val_steps += 1
                     if val_steps >= MAX_VAL_BATCHES:
                         break
@@ -236,6 +246,7 @@ def main():
     single_loader = DataLoader(val_ds, batch_size=1, shuffle=False, collate_fn=collate_fn)
     single_batch = next(iter(single_loader))
     single_batch.pop("gt_actions")
+    single_batch.pop("action_mask")
     single_batch = {k: v.to(device) for k, v in single_batch.items()}
 
     WARMUP = 10

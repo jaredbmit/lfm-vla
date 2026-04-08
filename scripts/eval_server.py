@@ -142,12 +142,15 @@ class BatchInferenceEngine:
             try:
                 # Build batch
                 dummy_chunk = torch.zeros(CHUNK_SIZE, ACTION_DIM)
+                dummy_mask = torch.ones(CHUNK_SIZE)
                 samples = [
-                    {"image": img, "instruction": instr, "action_chunk": dummy_chunk}
+                    {"image": img, "instruction": instr,
+                     "action_chunk": dummy_chunk, "action_mask": dummy_mask}
                     for img, instr, _, _ in pending
                 ]
                 vlm_inputs = self.collate_fn(samples)
                 vlm_inputs.pop("gt_actions")
+                vlm_inputs.pop("action_mask")
                 vlm_inputs = {k: v.to(self.device) for k, v in vlm_inputs.items()}
 
                 with torch.inference_mode():

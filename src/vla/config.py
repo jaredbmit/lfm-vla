@@ -12,6 +12,7 @@ ACTION_DIM = 7
 CHUNK_SIZE = 10
 MAX_LENGTH = 512
 RGB_PAD = 10
+IMAGE_SIZE = 224
 GRIPPER_LOSS_WEIGHT = 0.01
 
 # Action normalization: clip pose dims to [NORM_MIN, NORM_MAX] then rescale to [-1, 1].

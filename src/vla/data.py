@@ -8,7 +8,7 @@ import torch
 from PIL import Image
 from torch.utils.data import Dataset
 
-from vla.config import ACTION_TOKEN, RGB_PAD, INSTRUCTION_PREPROMPT, NORM_MIN, NORM_MAX
+from vla.config import ACTION_TOKEN, IMAGE_SIZE, RGB_PAD, INSTRUCTION_PREPROMPT, NORM_MIN, NORM_MAX
 
 
 def normalize_action(action: np.ndarray, norm_min: float = NORM_MIN,
@@ -74,12 +74,17 @@ class CALVINDataset(Dataset):
         texts = ann["language"]["ann"]
         indx = ann["info"]["indx"]
 
-        # Build flat index, excluding frames too close to the end of a segment
-        # to form a full chunk
+        # Build flat index — include ALL frames in each segment.
+        # Frames near the end that can't form a full chunk get a shorter
+        # valid_len; the action chunk is zero-padded and an action_mask is
+        # returned so the loss can ignore padded positions.
         self.samples = []
         for ann_idx, (start, end) in enumerate(indx):
-            for frame_id in range(start, end + 1 - (chunk_size - 1)):
-                self.samples.append((frame_id, ann_idx))
+            seg_len = end - start + 1
+            for frame_id in range(start, end + 1):
+                # How many future actions are actually available from this frame
+                valid_len = min(chunk_size, end + 1 - frame_id)
+                self.samples.append((frame_id, ann_idx, valid_len))
 
         self.texts = texts
 
@@ -93,27 +98,42 @@ class CALVINDataset(Dataset):
         return len(self.samples)
 
     def __getitem__(self, idx):
-        frame_id, ann_idx = self.samples[idx]
+        frame_id, ann_idx, valid_len = self.samples[idx]
         image = Image.fromarray(
             np.load(self._episode_path(frame_id))[self.image_key]
         )
+        image = image.resize((IMAGE_SIZE, IMAGE_SIZE), Image.BICUBIC)
         if self.rgb_pad > 0:
             image = random_shift(image, self.rgb_pad)
 
-        # Load action chunk: actions from frame_id to frame_id + chunk_size - 1
+        # Load action chunk: up to chunk_size actions starting at frame_id.
+        # If fewer than chunk_size are available (near segment end), zero-pad
+        # and build a mask so the loss can ignore padded positions.
         actions = []
-        for offset in range(self.chunk_size):
+        for offset in range(valid_len):
             ep = np.load(self._episode_path(frame_id + offset))
             actions.append(ep[self.action_key])
-        action_chunk = np.stack(actions)  # (chunk_size, 7)
+        action_chunk = np.stack(actions)  # (valid_len, 7)
         if self.norm_action:
             action_chunk = normalize_action(action_chunk, self.norm_min, self.norm_max)
+
+        # Pad to full chunk_size
+        if valid_len < self.chunk_size:
+            pad = np.zeros((self.chunk_size - valid_len, action_chunk.shape[-1]),
+                           dtype=action_chunk.dtype)
+            action_chunk = np.concatenate([action_chunk, pad], axis=0)
+
         action_chunk = torch.tensor(action_chunk, dtype=torch.float32)
+
+        # Mask: 1 for valid positions, 0 for padded
+        action_mask = torch.zeros(self.chunk_size, dtype=torch.float32)
+        action_mask[:valid_len] = 1.0
 
         return {
             "image": image,
             "instruction": self.texts[ann_idx],
             "action_chunk": action_chunk,
+            "action_mask": action_mask,
             "frame_id": frame_id,
         }
 
@@ -201,6 +221,7 @@ def make_calvin_collate_fn(processor, system_prompt: str, max_length: int = 512,
         vlm_inputs = tokenize(batch)
         _insert_token(vlm_inputs, action_token_id, tok.pad_token_id)
         vlm_inputs["gt_actions"] = torch.stack([s["action_chunk"] for s in batch])
+        vlm_inputs["action_mask"] = torch.stack([s["action_mask"] for s in batch])
         return vlm_inputs
 
     return collate
