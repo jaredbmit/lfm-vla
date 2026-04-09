@@ -74,15 +74,12 @@ class CALVINDataset(Dataset):
         texts = ann["language"]["ann"]
         indx = ann["info"]["indx"]
 
-        # Build flat index — include ALL frames in each segment.
-        # Frames near the end that can't form a full chunk get a shorter
-        # valid_len; the action chunk is zero-padded and an action_mask is
-        # returned so the loss can ignore padded positions.
+        # Samples is a flat collection of (frame_id, annotation_id, length)
+        # These are sub-episodes of length chunk_size
         self.samples = []
         for ann_idx, (start, end) in enumerate(indx):
-            seg_len = end - start + 1
+            # valid_len for sub-samples near episode boundary
             for frame_id in range(start, end + 1):
-                # How many future actions are actually available from this frame
                 valid_len = min(chunk_size, end + 1 - frame_id)
                 self.samples.append((frame_id, ann_idx, valid_len))
 
@@ -106,9 +103,6 @@ class CALVINDataset(Dataset):
         if self.rgb_pad > 0:
             image = random_shift(image, self.rgb_pad)
 
-        # Load action chunk: up to chunk_size actions starting at frame_id.
-        # If fewer than chunk_size are available (near segment end), zero-pad
-        # and build a mask so the loss can ignore padded positions.
         actions = []
         for offset in range(valid_len):
             ep = np.load(self._episode_path(frame_id + offset))

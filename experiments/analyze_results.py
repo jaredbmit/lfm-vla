@@ -223,8 +223,8 @@ def plot_loss_curves(models_data: dict, out_dir: Path):
         ax.grid(True, alpha=0.3)
         ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"{int(x):,}"))
 
-    ax_train.set_ylim(0.008, 0.035)
-    ax_val.set_ylim(0.01, 0.02)
+    ax_train.set_ylim(0.01, 0.05)
+    ax_val.set_ylim(0.01, 0.05)
 
     fig.suptitle("VLA Training Curves (CALVIN ABC→D)", fontsize=13, fontweight="bold")
     fig.tight_layout()
@@ -281,8 +281,8 @@ def animate_loss_curves(models_data: dict, out_dir: Path, fps: int = 30,
         ax.set_xlim(0, max_step * 1.02)
         ax.grid(True, alpha=0.3)
         ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"{int(x):,}"))
-    ax_train.set_ylim(0.008, 0.035)
-    ax_val.set_ylim(0.01, 0.02)
+    ax_train.set_ylim(0.01, 0.05)
+    ax_val.set_ylim(0.01, 0.05)
 
     train_lines = {}
     val_lines = {}

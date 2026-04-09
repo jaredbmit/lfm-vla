@@ -17,9 +17,12 @@ from vla import VLA, ACTION_TOKEN, CHUNK_SIZE, MODEL_REGISTRY, SYSTEM_PROMPT
 from vla.config import ACTION_DIM, GRIPPER_LOSS_WEIGHT, RGB_PAD, NORM_ACTION, NORM_MIN, NORM_MAX
 from vla.data import CALVINDataset, make_calvin_collate_fn
 
-# CALVIN_BASE = "/home/jared/drl/calvin/dataset/task_D_D_annotated"
-CALVIN_BASE = "/home/jared/drl/calvin/dataset/calvin_debug_dataset"
-RUN_DIR = "/home/jared/lfm-vla/runs"
+# CALVIN_BASE = "/home/jared/drl/calvin/dataset/calvin_debug_dataset"
+# RUN_DIR = "/home/jared/lfm-vla/runs"
+
+CALVIN_BASE = "/home/schmidt/ssci-jaredb/scratch_ssci-rus/jaredb/datasets/CALVIN/task_ABC_D_annotated"
+RUN_DIR = "/home/schmidt/ssci-jaredb/scratch_ssci-rus/jaredb/runs/v6"
+
 
 # HPPs
 NUM_STEPS = 30000
