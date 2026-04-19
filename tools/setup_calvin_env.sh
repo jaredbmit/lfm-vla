@@ -18,17 +18,38 @@ fi
 echo "==> Creating conda environment calvin_venv (Python 3.8)..."
 conda create -n calvin_venv python=3.8 -y
 
+echo "==> Patching calvin_models requirements (drop unbuildable pyhash)..."
+# pyhash 0.9.3 can no longer build on current PyPI: its setup.py uses
+# setuptools' removed `use_2to3` and its setup_requires pins cmake==3.18.4,
+# which was yanked. We stub it below instead.
+sed -i '/^pyhash$/d' "$CALVIN_DIR/calvin_models/requirements.txt"
+
 echo "==> Installing CALVIN packages..."
 conda run -n calvin_venv bash -c "
     cd '$CALVIN_DIR'
-    pip install wheel cmake==3.18.4
+    pip install wheel cmake
     cd calvin_env/tacto && pip install -e . && cd ..
     pip install -e .
     cd ../calvin_models && pip install -e .
 "
 
-echo "==> Applying NumPy 1.24 compatibility patches..."
+echo "==> Installing pyhash stub (fnv1_32 only)..."
 PYTHON_SITE=$(conda run -n calvin_venv python -c "import site; print(site.getsitepackages()[0])")
+mkdir -p "$PYTHON_SITE/pyhash"
+cat > "$PYTHON_SITE/pyhash/__init__.py" <<'PYEOF'
+"""Minimal pyhash stub: only fnv1_32 is used by calvin_agent."""
+
+class fnv1_32:
+    def __call__(self, data):
+        if isinstance(data, str):
+            data = data.encode("utf-8")
+        h = 0x811c9dc5
+        for b in data:
+            h = ((h * 0x01000193) ^ b) & 0xffffffff
+        return h
+PYEOF
+
+echo "==> Applying NumPy 1.24 compatibility patches..."
 
 # networkx: np.int removed in NumPy 1.24
 sed -i 's/(np\.int, "int")/(np.int_, "int")/g' \
