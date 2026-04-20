@@ -101,7 +101,7 @@ def main():
     log_path = run_dir / "metrics.csv"
     log_file = open(log_path, "w", newline="")
     csv_writer = csv.writer(log_file)
-    csv_writer.writerow(["step", "train_loss", "val_loss", "elapsed_sec", "gpu_mem_mib"])
+    csv_writer.writerow(["step", "train_loss", "val_loss", "elapsed_sec", "gpu_mem_mib", "eval_time_sec"])
 
     print(f"Run directory: {run_dir}")
     print(f"Model: {spec.model_id}")
@@ -208,6 +208,7 @@ def main():
             vla.eval()
             val_loss_sum = 0.0
             val_steps = 0
+            eval_start = time.time()
             with torch.no_grad():
                 for val_batch in val_loader:
                     gt = val_batch.pop("gt_actions").to(device)
@@ -219,9 +220,12 @@ def main():
                     if val_steps >= MAX_VAL_BATCHES:
                         break
             val_loss = val_loss_sum / val_steps
+            eval_elapsed = time.time() - eval_start
+            ms_per_batch = eval_elapsed / val_steps * 1000
             elapsed = time.time() - start_time
-            print(f"           val_loss={val_loss:.6f}")
-            csv_writer.writerow([update_step, "", f"{val_loss:.6f}", f"{elapsed:.1f}"])
+            print(f"           val_loss={val_loss:.6f}  eval_time={eval_elapsed:.1f}s "
+                  f"({val_steps} batches, {ms_per_batch:.0f} ms/batch)")
+            csv_writer.writerow([update_step, "", f"{val_loss:.6f}", f"{elapsed:.1f}", "", f"{eval_elapsed:.2f}"])
             log_file.flush()
 
             if val_loss < best_val_loss:
